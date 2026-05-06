@@ -86,6 +86,19 @@ def ElabM.withLetDecl (name : Name) (type : Expr) (value : Expr)
   fun _ k => Meta.withLetDecl name type value fun fvar =>
       (body fvar).run ctx |>.run k
 
+/-- `mkLambdaFVars` preceded by `synthesizeSyntheticMVarsNoPostponing`. Use
+    this when abstracting an fvar that was in scope during user-term
+    elaboration. -/
+def ElabM.mkLambdaFVarsSynth (fvars : Array Expr) (e : Expr) : ElabM Expr := do
+  synthesizeSyntheticMVarsNoPostponing
+  mkLambdaFVars fvars e
+
+/-- `mkLetFVars` preceded by `synthesizeSyntheticMVarsNoPostponing`. See
+    `ElabM.mkLambdaFVarsSynth`. -/
+def ElabM.mkLetFVarsSynth (fvars : Array Expr) (e : Expr) : ElabM Expr := do
+  synthesizeSyntheticMVarsNoPostponing
+  mkLetFVars fvars e
+
 /-- Fill a match arm's `?m` by elaborating `body` under the arm's pattern binders
     and assigning the abstracted result to the mvar. -/
 def ElabM.assignArmMVar (arm : Expr) (body : ElabM Expr) : ElabM Unit := do
@@ -95,6 +108,7 @@ def ElabM.assignArmMVar (arm : Expr) (body : ElabM Expr) : ElabM Unit := do
       let .mvar mvarId := ebody.getAppFn
         | throwError "elabDoMatch: expected metavariable arm body, got{indentExpr ebody}"
       let armExpr ← (body.run ctx).run pure
+      synthesizeSyntheticMVarsNoPostponing
       let value ←
         if ebody.isMVar then
           let usedFVars := fvars.filter (armExpr.occurs ·)
@@ -202,7 +216,7 @@ partial def mkCurriedLambda (subs : List PatShape) (types : List Expr)
     ElabM.withLocalDeclD n ty fun fv => do
       let innerBody ← mkCurriedLambda restSubs restTypes
         (fun fs => body (#[fv] ++ fs)) (idx + 1)
-      mkLambdaFVars #[fv] innerBody
+      ElabM.mkLambdaFVarsSynth #[fv] innerBody
 
 /-- Recursively unpack each `fv` per its `sub`, calling `body` with the collected leaves. -/
 partial def unpackAll (subs : List PatShape) (fvs : List Expr) (types : List Expr)
@@ -242,7 +256,7 @@ partial def mkPatContinuation (shape : PatShape) (ty : Expr)
   match shape with
   | .leaf n =>
     ElabM.withLocalDeclD n ty fun fv => do
-      mkLambdaFVars #[fv] (← body #[fv])
+      ElabM.mkLambdaFVarsSynth #[fv] (← body #[fv])
   | .prod subs =>
     let subTypes ← decomposeProductType ty subs.size
     let minor ← mkCurriedLambda subs.toList subTypes fun outerFvs =>
@@ -256,7 +270,7 @@ partial def mkPatContinuation (shape : PatShape) (ty : Expr)
         unpackAll subs.toList outerFvs.toList fieldTypes body
       let resultType ← computeCasesOnResultType minor fieldTypes
       let casesExpr ← mkCasesOn ty indName xFv minor resultType
-      mkLambdaFVars #[xFv] casesExpr
+      ElabM.mkLambdaFVarsSynth #[xFv] casesExpr
 
 /-- Elaborate `cond`, returning a `Prop`. `Bool` is coerced to `cond = true`.
     Synthetic mvars are forced so `Decidable` can be inferred downstream. -/
@@ -320,7 +334,7 @@ partial def elabMonadicAsDoElem
     let unitType ← mkConstWithFreshMVarLevels ``Unit
     ElabM.withLocalDeclD `_ unitType fun fvar => do
       let restExpr ← elabDoSeqCore rest
-      let body ← mkLambdaFVars #[fvar] restExpr
+      let body ← ElabM.mkLambdaFVarsSynth #[fvar] restExpr
       let expectedType ← ElabM.mkMonadicType unitType
       let e ← elabAtType expectedType
       ElabM.mkBind e body
@@ -354,7 +368,7 @@ partial def elabDoLetArrowId (x : Ident) (ty? : Option Term) (rhs : DoElem)
   let ty ← instantiateMVars ty
   ElabM.withLocalDeclD name ty fun fvar => do
     let restExpr ← elabDoSeqCore rest
-    let body ← mkLambdaFVars #[fvar] restExpr
+    let body ← ElabM.mkLambdaFVarsSynth #[fvar] restExpr
     ElabM.mkBind e body
 
 /-- Elaborate `let pat ← e`. -/
@@ -391,7 +405,7 @@ partial def elabDoLetId (x : Ident) (ty? : Option Term) (rhs : Term)
   let α ← instantiateMVars α
   ElabM.withLetDecl name α val fun fvar => do
     let restExpr ← elabDoSeqCore rest
-    mkLetFVars #[fvar] restExpr
+    ElabM.mkLetFVarsSynth #[fvar] restExpr
 
 /-- Elaborate `let pat := e`. -/
 partial def elabDoLetPat (pat : Term) (rhs : Term)
