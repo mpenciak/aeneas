@@ -397,9 +397,7 @@ def analyzeTarget : TacticM TargetKind := do
         let #[_m, _self, _α, _β, _value, cont] := e.getAppArgs
           | throwError "Expected bind to have 6 arguments, found {← e.getAppArgs.mapM (liftM ∘ ppExpr)}"
         -- Peel a `Function.uncurry (fun x₁ … xₙ => body)` wrapper, if present,
-        -- before looking at the binder names. Tuple destructuring uses
-        -- `Function.uncurry` so the bind continuation is `App`-headed rather
-        -- than `Lambda`-headed in that case.
+        -- before looking at the binder names. 
         let inner :=
           if cont.isAppOfArity ``Function.uncurry 4 then cont.appArg!
           else if cont.isAppOfArity ``Function.uncurry 5 then cont.appFn!.appArg!
@@ -509,11 +507,9 @@ where
     let targetKind ← analyzeTarget
     match targetKind with
     | .bind varNames => do
-      -- A binder is "useful" if it is neither macro-scoped nor a synthesized
-      -- elaborator placeholder (`_x0`, `_x1`, …). If every binder is unusable
-      -- we fall back to post-condition names by passing an empty array;
-      -- otherwise we emit one slot per binder, with `none` for the unusable
-      -- ones.
+      -- A binder name shouldn't be used if it is either macro-scoped or synthesized.
+      -- We fall back to post-condition names for unusable names if every name is unusable.
+      -- Otherwise we emit one slot per binder, with `none` for the unusable ones.
       let unusable (n : Name) : Bool :=
         n.hasMacroScopes || Step.Name.isElabSynthesized n
       let names :=

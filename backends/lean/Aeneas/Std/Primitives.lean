@@ -208,11 +208,6 @@ end Order
 
 attribute [simp, grind =] Function.uncurry_apply_pair
 
-/-- Pointwise equality for `Function.uncurry`, holding for any (possibly opaque) tuple.
-
-This is `rfl`, but is useful as a `simp` rewrite (in `step_simps`, see below) to normalize
-`Function.uncurry f x` — including when `x` is an opaque fvar — into `f x.fst x.snd`.
-The default `Function.uncurry_apply_pair` only fires when the argument is a literal `(a, b)`. -/
 theorem _root_.Function.uncurry_apply_eq {α β γ} (f : α → β → γ) (x : α × β) :
     Function.uncurry f x = f x.fst x.snd := rfl
 

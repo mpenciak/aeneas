@@ -75,12 +75,7 @@ theorem spec_div : spec div p ↔ False := by simp [spec, theta]
 
 /-! ### `spec_*` for tuple posts
 
-The Aeneas `⦃ (a, b) => … ⦄` macro encodes the tuple binder as
-`Function.uncurry (fun a b => …)`. The lemmas below are the combined
-`spec_ok` / `Function.uncurry_apply_pair` rewrites that bring such a goal
-into its destructured form in a single `simp` step. They let end-users use
-`simp only [spec_ok]`-style proofs without ever having to mention
-`Function.uncurry`. -/
+Needed now with the new `uncurry`-based pattern matching. -/
 
 @[simp, grind =, agrind =]
 theorem spec_ok_pair {α β} (a : α) (b : β) (f : α → β → Prop) :
@@ -226,9 +221,7 @@ scoped syntax:54 term:55 " ⦃ " term " ⦄" : term
 
 open Lean PrettyPrinter
 
-/-- Build a `Function.uncurry`-chain wrapping a curried lambda over `xs`. The
-result has type matching the right-associated product of `xs`'s types →
-`body`'s type. Returns `body` unchanged if `xs` is empty. -/
+/-- Build a `Function.uncurry`-chain wrapping a curried lambda over `xs`. -/
 private partial def buildUncurryLam (xs : List (TSyntax `term)) (body : TSyntax `term) :
     MacroM (TSyntax `term) := do
   match xs with
@@ -240,11 +233,7 @@ private partial def buildUncurryLam (xs : List (TSyntax `term)) (body : TSyntax 
     `(Function.uncurry (fun $a => $inner))
 
 /-- Build a function from a single (possibly tuple-patterned) binder. For a
-flat tuple pattern `(a, b, …)` we emit a `Function.uncurry` chain over the
-leaf binders so that the resulting function reduces cleanly under `simp`
-(`Function.uncurry_apply_eq`/`_apply_pair`). For non-tuple patterns we keep
-the existing `fun $x => …` form, which leaves Lean's pattern-lambda
-machinery untouched. -/
+flat tuple pattern `(a, b, …)` we emit a `Function.uncurry` chain.  -/
 private def mkBinderFun (binder : TSyntax `term) (body : TSyntax `term) :
     MacroM (TSyntax `term) := do
   match binder with
@@ -286,9 +275,7 @@ open Delaborator SubExpr
 
 def elabSubExpr (e : SubExpr) : Delab := withTheReader SubExpr (fun _ => e) delab
 
-/-- A post-condition binder slot, as collected by `telescopePredn`. Either a
-single variable (from `predn (fun x => …)`) or a tuple of variables (from
-`Function.uncurry (fun a b => …)`). -/
+/-- A post-condition binder slot, as collected by `telescopePredn`. -/
 inductive PostBinder where
   | single (e : SubExpr)
   | tuple (es : Array SubExpr)
@@ -305,22 +292,11 @@ def PostBinder.toTerm : PostBinder → Delab
     `(($head, $tail,*))
 
 /-- Strip `predn` and `Function.uncurry` wrappers from a post-condition expression,
-collecting the bound names as `PostBinder` slots. Each layer contributes:
-- a single binder, from `predn (fun x => …)` or a final `fun x => …`; or
-- a tuple binder, from `Function.uncurry (fun a b => …)`.
-
-The leaf `body` returned is the post itself.
-
-`Function.uncurry` is binary, so we peel exactly two binders per uncurry layer.
-A nested tuple binder like `((a, b), c)` is not handled specially: the macro
-encodes it as a `Function.uncurry` over a pattern-lambda which Lean's standard
-delaborator will render. -/
+collecting the bound names as `PostBinder` slots. -/
 partial def telescopePredn (vars : Array PostBinder) (e : SubExpr)
     (k : Array PostBinder → SubExpr → Delab) : Delab := do
   let expr := e.expr.consumeMData
   -- Peel `Function.uncurry (fun a b => body)` into a tuple binder `(a, b)`.
-  -- The recursion has to happen *inside* the `lambdaBoundedTelescope` so that
-  -- the fresh fvars remain in scope when the body's delaboration eventually runs.
   if expr.isAppOfArity ``Function.uncurry 4 then
     let lam := expr.appArg!.consumeMData
     Meta.lambdaBoundedTelescope lam 2 fun lamArgs lamBody => do
@@ -345,8 +321,7 @@ partial def telescopePredn (vars : Array PostBinder) (e : SubExpr)
     Meta.lambdaTelescope expr fun lamArgs lamBody => do
       let pos := e.pos
       -- Single-binder lambda whose body re-enters the binder telescope
-      -- (`predn (…)` or `Function.uncurry (…)`): recurse so the next layer's
-      -- binders join the same `var₁ var₂ … =>` list.
+      -- (`predn (…)` or `Function.uncurry (…)`)
       if lamArgs.size = 1
          ∧ (lamBody.isAppOfArity ``predn 3 ∨ lamBody.isAppOfArity ``Function.uncurry 4) then
         let arg := lamArgs[0]!

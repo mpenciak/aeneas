@@ -244,10 +244,7 @@ def getFirstBind (goalTy : Expr) : MetaM (Bool × Expr) := do
 /-- Extract the variable names from the bind continuation in the current goal.
     Returns an empty array if the goal is not a bind, or if the continuation
     has no extractable lambda binders. The array contains `some name` for
-    user-supplied names and `none` for compiler-generated (macro-scoped) ones.
-
-    Tuple-destructuring binds wrap the continuation in `Function.uncurry`, so
-    we peel one `Function.uncurry` layer before reading the lambda binders. -/
+    user-supplied names and `none` for compiler-generated (macro-scoped) ones. -/
 def getBindVarNames : TacticM (Array (Option Name)) := do
   try
     withMainContext do
@@ -282,7 +279,8 @@ def getBindVarNames : TacticM (Array (Option Name)) := do
     Returns `some name` for user-provided names and `none` for anonymous/compiler-generated ones.
 
     For instance, given: `e ⦃ x _ y z => ... ⦄`, this function outputs: `[some x, none, some y, some z]`.
-    For `e ⦃ (a, b) c => ... ⦄`, the new macro emits `predn (Function.uncurry (fun a b => fun c => …))`,
+
+    For `e ⦃ (a, b) c => ... ⦄`, emits `predn (Function.uncurry (fun a b => fun c => …))`,
     so the recursion peels both wrappers and yields `[some a, some b, some c]`. -/
 partial def getPostNames (e : Expr) : MetaM (Array (Option Name)) := do
   let e := e.consumeMData
@@ -324,27 +322,21 @@ def getPostNamesFromGoal : TacticM (Array (Option Name)) := do
     else pure #[]
   catch _ => pure #[]
 
-/-- Names introduced by the new `do` elaborator's `mkPatContinuation` for
-    non-leaf tuple/ctor binders are synthesized as `_x0`, `_x1`, … (see
-    `Aeneas/Do/Elab.lean`). These are not user names and should be replaced
-    by post-condition names when possible. -/
+/-- Names introduced by the `do` elaborator's `mkPatContinuation` for
+    non-leaf tuple/ctor binders. These should be replaced by post-condition
+    names when possible. -/
 def Name.isElabSynthesized : Name → Bool
   | .str .anonymous s => s.startsWith "_x" && s.length > 2 && (s.drop 2).all Char.isDigit
   | _ => false
 
 /-- Extract variable names from the current goal for naming `step` outputs.
     If the goal is a bind (`let x ← ...` or `let (a, b, …) ← …`), extracts the
-    binding names. Synthesized elaborator names (`_x0`, `_x1`, …) are dropped
-    so that post-condition names take precedence. -/
+    binding names. Synthesized are dropped. -/
 def getVarNamesFromGoal : TacticM (Array (Option Name) × Option Name) := do
   let bindNames ← getBindVarNames
-  -- Treat synthesized `_xN` names as anonymous so they don't shadow the
-  -- user-written tuple post names.
   let bindNames := bindNames.map fun n? => match n? with
     | some n => if Name.isElabSynthesized n then none else some n
     | none => none
-  -- Use the bind names if at least one is a real (non-anonymous) name;
-  -- otherwise fall back to the post-condition.
   if bindNames.any Option.isSome then
     pure (bindNames, bindNames.findSome? id)
   else
