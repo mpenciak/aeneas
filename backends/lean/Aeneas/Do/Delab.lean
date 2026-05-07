@@ -83,10 +83,16 @@ where
     let (restPats, a) ← delabBinders rest k
     return (#[leafPat] ++ restPats, a)
 
-/-- `Function.uncurry (fun x₁ … xₙ => body) val` → `let (x₁, …, xₙ) := val; body` -/
+/-- `Function.uncurry (fun x₁ … xₙ => body) val` → `let (x₁, …, xₙ) := val; body`.
+
+Only fires when `Function.uncurry` is fully applied (arity 5 — the three implicit
+type args, the curried function, and the destructured value). The unapplied form
+`Function.uncurry (fun x₁ … xₙ => body)` has arity 4 and falls through to the
+default delaborator (which renders it as a `fun` term). -/
 @[delab app.Function.uncurry]
 def delabUncurryLet : Delab := do
   unless Aeneas.customDoElab.get (← getOptions) do failure
+  unless (← getExpr).isAppOfArity ``Function.uncurry 5 do failure
   let valStx ← withAppArg delab
   let (pats, bodyStx) ← withAppFn <| withAppArg <|
     enterUncurryChain #[] fun outerBinders => do

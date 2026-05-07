@@ -284,35 +284,79 @@ macro_rules
 
 open Delaborator SubExpr
 
-/--
-Small helper to decompose nested `predn`s: we strip all the variables bound in a lambda inside the `predn`s.
--/
-partial def telescopePredn (vars : Array SubExpr) (e : SubExpr) (k : Array SubExpr → SubExpr → Delab) : Delab :=
-  e.expr.consumeMData.withApp fun app args => do
-  if h: app.isConstOf ``predn ∧ args.size = 3 then
-    let pred := args[2]
-    Meta.lambdaTelescope pred.consumeMData fun args body => do
-    let pos := e.pos.push 1
-    if h: args.size = 1 ∧ body.isAppOf ``predn then
-      let vars := vars.push { expr := args[0], pos := pos.push 0 }
-      telescopePredn vars { expr := body, pos := pos.push 1} k
-    else
-      let mut vars := vars
-      let mut pos := e.pos
-      for arg in args do
-        vars := vars.push { expr := arg, pos := pos.push 0 }
-        pos := pos.push 1
-      k vars { expr := body, pos }
-  else do
-    Meta.lambdaTelescope e.expr.consumeMData fun args body => do
-    let mut vars := vars
-    let mut pos := e.pos
-    for arg in args do
-      vars := vars.push { expr := arg, pos := pos.push 0 }
-      pos := pos.push 1
-    k vars { expr := body, pos }
-
 def elabSubExpr (e : SubExpr) : Delab := withTheReader SubExpr (fun _ => e) delab
+
+/-- A post-condition binder slot, as collected by `telescopePredn`. Either a
+single variable (from `predn (fun x => …)`) or a tuple of variables (from
+`Function.uncurry (fun a b => …)`). -/
+inductive PostBinder where
+  | single (e : SubExpr)
+  | tuple (es : Array SubExpr)
+
+/-- Render a `PostBinder` as a `Term`, delabbing each underlying `SubExpr` so
+that variable names line up with how they appear inside the post body. -/
+def PostBinder.toTerm : PostBinder → Delab
+  | .single e => elabSubExpr e
+  | .tuple es => do
+    let ts ← es.mapM elabSubExpr
+    if h : ts.size = 1 then return ts[0]
+    let head := ts[0]!
+    let tail := ts.extract 1 ts.size
+    `(($head, $tail,*))
+
+/-- Strip `predn` and `Function.uncurry` wrappers from a post-condition expression,
+collecting the bound names as `PostBinder` slots. Each layer contributes:
+- a single binder, from `predn (fun x => …)` or a final `fun x => …`; or
+- a tuple binder, from `Function.uncurry (fun a b => …)`.
+
+The leaf `body` returned is the post itself.
+
+`Function.uncurry` is binary, so we peel exactly two binders per uncurry layer.
+A nested tuple binder like `((a, b), c)` is not handled specially: the macro
+encodes it as a `Function.uncurry` over a pattern-lambda which Lean's standard
+delaborator will render. -/
+partial def telescopePredn (vars : Array PostBinder) (e : SubExpr)
+    (k : Array PostBinder → SubExpr → Delab) : Delab := do
+  let expr := e.expr.consumeMData
+  -- Peel `Function.uncurry (fun a b => body)` into a tuple binder `(a, b)`.
+  -- The recursion has to happen *inside* the `lambdaBoundedTelescope` so that
+  -- the fresh fvars remain in scope when the body's delaboration eventually runs.
+  if expr.isAppOfArity ``Function.uncurry 4 then
+    let lam := expr.appArg!.consumeMData
+    Meta.lambdaBoundedTelescope lam 2 fun lamArgs lamBody => do
+      if lamArgs.size = 2 then
+        let pos := e.pos
+        let es : Array SubExpr := #[
+          { expr := lamArgs[0]!, pos },
+          { expr := lamArgs[1]!, pos }
+        ]
+        telescopePredn (vars.push (.tuple es)) { expr := lamBody, pos } k
+      else
+        -- Couldn't peel a binary lambda; treat as terminal.
+        let mut vars := vars
+        for arg in lamArgs do
+          vars := vars.push (.single { expr := arg, pos := e.pos })
+        k vars { expr := lamBody, pos := e.pos }
+  -- Peel `predn (...)`: descend into the inner predicate.
+  else if expr.isAppOfArity ``predn 3 then
+    let pred := expr.getAppArgs[2]!
+    telescopePredn vars { expr := pred, pos := (e.pos.push 1).push 2 } k
+  else
+    Meta.lambdaTelescope expr fun lamArgs lamBody => do
+      let pos := e.pos
+      -- Single-binder lambda whose body re-enters the binder telescope
+      -- (`predn (…)` or `Function.uncurry (…)`): recurse so the next layer's
+      -- binders join the same `var₁ var₂ … =>` list.
+      if lamArgs.size = 1
+         ∧ (lamBody.isAppOfArity ``predn 3 ∨ lamBody.isAppOfArity ``Function.uncurry 4) then
+        let arg := lamArgs[0]!
+        telescopePredn (vars.push (.single { expr := arg, pos }))
+          { expr := lamBody, pos } k
+      else
+        let mut vars := vars
+        for arg in lamArgs do
+          vars := vars.push (.single { expr := arg, pos })
+        k vars { expr := lamBody, pos }
 
 @[scoped delab app.Aeneas.Std.WP.spec]
 def delabSpec : Delab := do
@@ -323,16 +367,15 @@ def delabSpec : Delab := do
   let monadExpr ← elabSubExpr { expr := args[1]!, pos := (pos.push 0).push 1 }
   let post : SubExpr := { expr := args[2]!, pos := pos.push 1 }
   telescopePredn #[] post fun vars post => do
-  let vars ← vars.mapM elabSubExpr
   let post ← elabSubExpr post
   if vars.size = 0 then
     -- This is the case where the post-condition doesn't have a lambda
     `($monadExpr ⦃ $post ⦄)
   else
-    --
-    let var := vars[0]!
-    let vars := vars.drop 1
-    `($monadExpr ⦃ $var $vars* => $post ⦄)
+    let varTerms ← vars.mapM PostBinder.toTerm
+    let var := varTerms[0]!
+    let varTail := varTerms.drop 1
+    `($monadExpr ⦃ $var $varTail* => $post ⦄)
 
 /-!
 # Tests

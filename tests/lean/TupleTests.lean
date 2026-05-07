@@ -27,18 +27,13 @@ def baz : Result Nat := do
   ok (a + f + g + d)
 
 example : baz ⦃ res => res = 18⦄ := by
-  -- After the `step*` fixes that accompany the new `do` elaborator the
-  -- explicit `let*` chain (kept below for documentation) collapses to a single
-  -- `step*` invocation.
-  --
-  -- unfold baz
-  -- simp only [step_simps]
-  -- let* ⟨ _, _, _, _ ⟩ ← foo_spec
-  -- let* ⟨ _, _, _, _ ⟩ ← foo_spec
-  -- let* ⟨ _, _, _ ⟩ ← bar_spec
-  -- let* ⟨ _, _, _ ⟩ ← bar_spec
-  -- agrind
-  unfold baz; step*
+  unfold baz
+  simp only [step_simps]
+  let* ⟨ a, b, a_post1, a_post2 ⟩ ← foo_spec
+  let* ⟨ c, d, c_post1, c_post2 ⟩ ← foo_spec
+  let* ⟨ _, _, _ ⟩ ← bar_spec
+  let* ⟨ _, _, _ ⟩ ← bar_spec
+  agrind
 
 def mkTriple (x : Nat) : Result ((Nat × Nat) × Nat) :=
   ok ((x, x+1), x+2)
@@ -50,7 +45,7 @@ def mkTriple (x : Nat) : Result ((Nat × Nat) × Nat) :=
   by
   simp [mkTriple]
   
-
+#print mkTriple_spec
 
 end tuples
 
