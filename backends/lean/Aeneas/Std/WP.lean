@@ -73,6 +73,28 @@ theorem spec_fail (e : Error) : spec (fail e) p ↔ False := by simp [spec, thet
 @[simp, grind =, agrind =]
 theorem spec_div : spec div p ↔ False := by simp [spec, theta]
 
+/-! ### `spec_*` for tuple posts
+
+The Aeneas `⦃ (a, b) => … ⦄` macro encodes the tuple binder as
+`Function.uncurry (fun a b => …)`. The lemmas below are the combined
+`spec_ok` / `Function.uncurry_apply_pair` rewrites that bring such a goal
+into its destructured form in a single `simp` step. They let end-users use
+`simp only [spec_ok]`-style proofs without ever having to mention
+`Function.uncurry`. -/
+
+@[simp, grind =, agrind =]
+theorem spec_ok_pair {α β} (a : α) (b : β) (f : α → β → Prop) :
+    spec (ok (a, b)) (Function.uncurry f) ↔ f a b := by
+  simp [spec_ok, Function.uncurry_apply_pair]
+
+@[simp, grind =, agrind =]
+theorem spec_fail_pair (e : Error) (f : α → β → Prop) :
+    spec (fail e) (Function.uncurry f) ↔ False := by simp
+
+@[simp, grind =, agrind =]
+theorem spec_div_pair (f : α → β → Prop) :
+    spec div (Function.uncurry f) ↔ False := by simp
+
 theorem spec_mono {α} {P₁ : Post α} {m : Result α} {P₀ : Post α} (h : spec m P₀):
   (∀ x, P₀ x → P₁ x) → spec m P₁ := by
   intros HMonPost
@@ -204,21 +226,51 @@ scoped syntax:54 term:55 " ⦃ " term " ⦄" : term
 
 open Lean PrettyPrinter
 
+/-- Build a `Function.uncurry`-chain wrapping a curried lambda over `xs`. The
+result has type matching the right-associated product of `xs`'s types →
+`body`'s type. Returns `body` unchanged if `xs` is empty. -/
+private partial def buildUncurryLam (xs : List (TSyntax `term)) (body : TSyntax `term) :
+    MacroM (TSyntax `term) := do
+  match xs with
+  | [] => pure body
+  | [x] => `(fun $x => $body)
+  | [a, b] => `(Function.uncurry (fun $a $b => $body))
+  | a :: rest =>
+    let inner ← buildUncurryLam rest body
+    `(Function.uncurry (fun $a => $inner))
+
+/-- Build a function from a single (possibly tuple-patterned) binder. For a
+flat tuple pattern `(a, b, …)` we emit a `Function.uncurry` chain over the
+leaf binders so that the resulting function reduces cleanly under `simp`
+(`Function.uncurry_apply_eq`/`_apply_pair`). For non-tuple patterns we keep
+the existing `fun $x => …` form, which leaves Lean's pattern-lambda
+machinery untouched. -/
+private def mkBinderFun (binder : TSyntax `term) (body : TSyntax `term) :
+    MacroM (TSyntax `term) := do
+  match binder with
+  | `( ($a, $bs,*) ) =>
+    let xs : List (TSyntax `term) := a :: bs.getElems.toList
+    buildUncurryLam xs body
+  | _ => `(fun $binder => $body)
+
 /-- Macro expansion for a single element -/
 macro_rules
-  | `($e ⦃ $x => $p ⦄) => do `(_root_.Aeneas.Std.WP.spec $e fun $x => $p)
+  | `($e ⦃ $x => $p ⦄) => do
+    let post ← mkBinderFun x p
+    `(_root_.Aeneas.Std.WP.spec $e $post)
 
 /-- Macro expansion for multiple elements -/
 macro_rules
   | `($e ⦃ $x $xs:term* => $p ⦄) => do
-    let mut xs : List (TSyntax `term) := x :: xs.toList
+    let xs : List (TSyntax `term) := x :: xs.toList
     let rec run (xs : List (TSyntax `term)) : MacroM (TSyntax `term) := do
       match xs with
       | [] => `($p)
-      | [x] => `(fun $x => $p)
+      | [x] => mkBinderFun x p
       | x :: xs =>
         let xs ← run xs
-        `(_root_.Aeneas.Std.WP.predn fun $x => $xs)
+        let inner ← mkBinderFun x xs
+        `(_root_.Aeneas.Std.WP.predn $inner)
     let post ← run xs
     `(Aeneas.Std.WP.spec $e $post)
 
@@ -364,18 +416,13 @@ example (x : Nat) :
     -- step as ⟨ y, z ⟩
     apply spec_bind
     . apply add2_spec
-    intro tmp h
-    split at h
-    rename_i tmp y z
-    clear tmp
+    rintro ⟨y, z⟩ h
+    simp at h
     -- step as ⟨ y1, z1⟩
     apply spec_mono
     . apply add2_spec
-    intro tmp h
-    split at h
-    rename_i tmp y1 z1
-    clear tmp
-    --
+    rintro ⟨y1, z1⟩ h
+    simp at h
     grind
 
 theorem  add2_spec' (x : Nat) : add2 x ⦃ y z => y = x + 1 ∧ z = x + 2⦄ :=

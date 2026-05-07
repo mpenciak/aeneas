@@ -73,6 +73,7 @@ attribute [step_simps]
 
 attribute [step_simps] Aeneas.Std.bind_assoc_eq
 attribute [step_simps] Function.uncurry_apply_pair
+attribute [step_simps] Function.uncurry_apply_eq
 
 attribute [step_post_simps]
   -- We often see expressions like `Int.ofNat 3`
@@ -240,10 +241,14 @@ def getFirstBind (goalTy : Expr) : MetaM (Bool × Expr) := do
   then pure (true, args[4])
   else pure (false, compTy)
 
-/-- Extract the variable name from the let-binding in the current goal.
-    Returns `none` if the goal if we can't extract the name (the goal is not
-    a bind for instance) or if the name is compiler-generated. -/
-def getBindVarName : TacticM (Option Name) := do
+/-- Extract the variable names from the bind continuation in the current goal.
+    Returns an empty array if the goal is not a bind, or if the continuation
+    has no extractable lambda binders. The array contains `some name` for
+    user-supplied names and `none` for compiler-generated (macro-scoped) ones.
+
+    Tuple-destructuring binds wrap the continuation in `Function.uncurry`, so
+    we peel one `Function.uncurry` layer before reading the lambda binders. -/
+def getBindVarNames : TacticM (Array (Option Name)) := do
   try
     withMainContext do
     let goalTy ← (← getMainGoal).getType
@@ -256,20 +261,29 @@ def getBindVarName : TacticM (Option Name) := do
       let fn := e.getAppFn
       if h2 : (fn.isConstOf ``Bind.bind ∨ fn.isConstOf ``bind) ∧ bargs.size = 6 then
         let cont := bargs[5]
-        lambdaOne cont fun x _ => do
-          let rawName ← x.fvarId!.getUserName
-          -- Skip compiler-generated names (e.g., `__discr` from pattern matching)
-          if rawName.hasMacroScopes then return none
-          else pure (some rawName)
-      else return none
-    else return none
-  catch _ => pure none
+        -- Peel `Function.uncurry (fun a b … => …)` (arity 4 = unapplied,
+        -- arity 5 = applied to a value) so we can see the inner lambda.
+        let inner :=
+          if cont.isAppOfArity ``Function.uncurry 4 then cont.appArg!
+          else if cont.isAppOfArity ``Function.uncurry 5 then cont.appFn!.appArg!
+          else cont
+        if inner.isLambda then
+          lambdaTelescope inner fun xs _ => do
+            xs.mapM fun x => do
+              let rawName ← x.fvarId!.getUserName
+              if rawName.hasMacroScopes then pure none else pure (some rawName)
+        else return #[]
+      else return #[]
+    else return #[]
+  catch _ => pure #[]
 
-/-- Extract names from a post-condition expression by recursively decomposing lambdas and `WP.curry`.
+/-- Extract names from a post-condition expression by recursively decomposing lambdas
+    and various wrappers (`WP.curry`, `WP.predn`, `Function.uncurry`).
     Returns `some name` for user-provided names and `none` for anonymous/compiler-generated ones.
 
     For instance, given: `e ⦃ x _ y z => ... ⦄`, this function outputs: `[some x, none, some y, some z]`.
--/
+    For `e ⦃ (a, b) c => ... ⦄`, the new macro emits `predn (Function.uncurry (fun a b => fun c => …))`,
+    so the recursion peels both wrappers and yields `[some a, some b, some c]`. -/
 partial def getPostNames (e : Expr) : MetaM (Array (Option Name)) := do
   let e := e.consumeMData
   if e.isLambda then
@@ -288,6 +302,14 @@ partial def getPostNames (e : Expr) : MetaM (Array (Option Name)) := do
     if h: args.size = 4 then
       getPostNames args[3]
     else pure #[]
+  else if e.isAppOfArity ``Std.WP.predn 3 then
+    -- predn {α β} (p : α → β → Prop) : α × β → Prop
+    -- The inner predicate is the third (and last) explicit argument.
+    getPostNames e.getAppArgs[2]!
+  else if e.isAppOfArity ``Function.uncurry 4 then
+    -- Function.uncurry {α β γ} (f : α → β → γ) : α × β → γ
+    -- The (curried) lambda is the fourth (and last) argument.
+    getPostNames e.getAppArgs[3]!
   else pure #[]
 
 /-- Extract the names used in the post-condition of the current goal.
@@ -302,13 +324,30 @@ def getPostNamesFromGoal : TacticM (Array (Option Name)) := do
     else pure #[]
   catch _ => pure #[]
 
+/-- Names introduced by the new `do` elaborator's `mkPatContinuation` for
+    non-leaf tuple/ctor binders are synthesized as `_x0`, `_x1`, … (see
+    `Aeneas/Do/Elab.lean`). These are not user names and should be replaced
+    by post-condition names when possible. -/
+def Name.isElabSynthesized : Name → Bool
+  | .str .anonymous s => s.startsWith "_x" && s.length > 2 && (s.drop 2).all Char.isDigit
+  | _ => false
+
 /-- Extract variable names from the current goal for naming `step` outputs.
-    If the goal is a bind (`let x ← ...`), extracts the binding name.
-    Otherwise, extracts names from the post-condition. -/
+    If the goal is a bind (`let x ← ...` or `let (a, b, …) ← …`), extracts the
+    binding names. Synthesized elaborator names (`_x0`, `_x1`, …) are dropped
+    so that post-condition names take precedence. -/
 def getVarNamesFromGoal : TacticM (Array (Option Name) × Option Name) := do
-  match ← getBindVarName with
-  | some name => pure (#[some name], some name)
-  | none =>
+  let bindNames ← getBindVarNames
+  -- Treat synthesized `_xN` names as anonymous so they don't shadow the
+  -- user-written tuple post names.
+  let bindNames := bindNames.map fun n? => match n? with
+    | some n => if Name.isElabSynthesized n then none else some n
+    | none => none
+  -- Use the bind names if at least one is a real (non-anonymous) name;
+  -- otherwise fall back to the post-condition.
+  if bindNames.any Option.isSome then
+    pure (bindNames, bindNames.findSome? id)
+  else
     let names ← getPostNamesFromGoal
     pure (names, names[0]?.join)
 
@@ -581,6 +620,19 @@ def introOutputs (args : Args) (fExpr : Expr) (stepState : StepState) :
   let (posts, goal) ← goal.introN postFixLength postsIds
   setGoals [goal]
   traceGoalWithNode "goal after introducing the post-conditions"
+
+  /- Reduce any leftover `Function.uncurry _ fvar` in the freshly-introduced
+     post hypotheses. The earlier simp passes target the *goal*, so after
+     `introN` produces fresh hypotheses we have to give the step_simps lemmas
+     (notably `Function.uncurry_apply_eq`) a chance to fire on them. Without
+     this, nested-tuple posts like `(a, b) (c, d) => …` leave the inner
+     `Function.uncurry (fun c d => …) x_n` un-reduced. -/
+  if posts.size > 0 then
+    withTraceNode `Step (fun _ => pure m!"simpAt: reducing Function.uncurry in posts") do
+    let _ ← Simp.simpAt (simpOnly := true)
+      { maxDischargeDepth := 1, failIfUnchanged := false, iota := false }
+      { simpThms := #[← stepSimpExt.getTheorems] }
+      (.targets posts false)
 
   -- Build the Output information
   let mkName? (n : Name) : Option Name :=
