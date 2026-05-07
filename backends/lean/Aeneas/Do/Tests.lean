@@ -723,12 +723,26 @@ def dep_return_match (b : Bool) : Result (Std.Array U64 25#usize) := do
   | true => f_dep 25#usize
   | false => f_dep 25#usize
 
+/-- Match with pattern-bound fvars in the arm context (non-trivial
+    `assignArmMVar` path). -/
+def dep_return_match_pat (o : Option Nat) : Result (Std.Array U64 25#usize) := do
+  match o with
+  | some _x => f_dep 25#usize
+  | none => f_dep 25#usize
+
 /-- If branches with rest = [] (`elabMonadicAsDoElem` leaf path). -/
 def dep_return_if (b : Bool) : Result (Std.Array U64 25#usize) := do
   if b then
     f_dep 25#usize
   else
     f_dep 25#usize
+
+/-- Non-bound monadic statement before a dependent return
+    (`elabMonadicAsDoElem` rest ≠ [] path). -/
+def dep_return_seq : Result (Std.Array U64 25#usize) := do
+  let _x : Usize ← pure 0#usize
+  pure ()
+  f_dep 25#usize
 
 end CapturedSynthMVarTests
 
